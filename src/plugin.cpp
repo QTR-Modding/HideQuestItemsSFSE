@@ -40,7 +40,7 @@ SFSE_PLUGIN_LOAD(const SFSE::LoadInterface* a_sfse)
         return false;
     }
 
-    SFSE::Init(a_sfse);
+    SFSE::Init(a_sfse, { .trampoline = true, .trampolineSize = 64 });
     if (a_sfse->RuntimeVersion() != SFSE::RUNTIME_SF_1_16_244) {
         logger::critical("Unsupported Starfield runtime {}", a_sfse->RuntimeVersion());
         return false;
