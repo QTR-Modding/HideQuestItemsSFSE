@@ -1,12 +1,13 @@
 #include "hooks/PlayerInventoryHook.h"
 
-#include "runtime/QuestItemVisibility.h"
+#include "runtime/PlayerInventoryVisibility.h"
 #include "settings/Settings.h"
 
 #include "REL/ASM.h"
 #include "REL/Utility.h"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 
@@ -14,112 +15,210 @@ namespace HideQuestItems::Hooks::PlayerInventory
 {
     namespace
     {
-        using PublishItem = void (*)(void*, const RE::BGSInventoryItem*);
+        using Reconcile = Runtime::PlayerInventoryReconcile;
+        using ProcessMessage = RE::UI_MESSAGE_RESULT (*)(RE::IMenu*, RE::UIMessageData&);
 
-        constexpr REL::ID kPublishItem{ 88084 };
-        constexpr REL::ID kInitialPublishCaller{ 88102 };
-        constexpr REL::ID kUpdatePublishCaller{ 88119 };
-        constexpr std::ptrdiff_t kInitialPublishOffset = 0x1D7;
-        constexpr std::ptrdiff_t kUpdatePublishOffset = 0x1B0;
+        constexpr std::uint32_t kForceHideMessage = 4;
+        constexpr std::size_t kProcessMessageSlot = 0x08;
+        constexpr std::size_t kReconcilePrologueSize = 5;
 
-        constexpr std::array<std::uint8_t, 5> kInitialPublishCall{
-            0xE8, 0x64, 0xE2, 0xFF, 0xFF
-        };
-        constexpr std::array<std::uint8_t, 5> kUpdatePublishCall{
-            0xE8, 0x6B, 0xCE, 0xFF, 0xFF
+        constexpr std::array<std::uint8_t, kReconcilePrologueSize> kReconcilePrologue{
+            0x48, 0x89, 0x5C, 0x24, 0x10
         };
         constexpr std::array<std::uint8_t, 6> kAbsoluteJump{
             0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
         };
 
-        REL::Relocation<PublishItem> originalPublishItem;
+        std::atomic_bool inventoryMenuOpen = false;
+        REL::Relocation<Reconcile> originalReconcile;
+        REL::Relocation<ProcessMessage> originalProcessMessage;
+        std::uintptr_t reconcileAddress = 0;
+        std::uintptr_t processMessageSlotAddress = 0;
+        std::uintptr_t processMessageAddress = 0;
 
-        void PublishItemThunk(void* a_context, const RE::BGSInventoryItem* a_item)
+        void QueueRefresh()
         {
-            if (a_item && Settings::GetPlayerInventoryMenuEnabled() &&
-                Runtime::ShouldHide(*a_item)) {
+            const auto* tasks = SFSE::GetTaskInterface();
+            if (!tasks) {
+                logger::error("Could not queue the player inventory refresh");
                 return;
             }
 
-            originalPublishItem(a_context, a_item);
+            tasks->AddTask([] { Refresh(); });
         }
 
-        [[nodiscard]] bool HasExpectedCall(
-            const REL::Relocation<std::uintptr_t>& a_site,
-            const std::array<std::uint8_t, 5>& a_bytes) noexcept
+        void ReconcileThunk(RE::PlayerInventoryDataModel* a_model, bool a_incremental)
         {
-            return std::memcmp(
-                       reinterpret_cast<const void*>(a_site.address()),
-                       a_bytes.data(),
-                       a_bytes.size()) == 0 &&
-                   REL::ASM::CALL5::TARGET(a_site.address()) == originalPublishItem.address();
+            if (inventoryMenuOpen.load(std::memory_order_relaxed) &&
+                Settings::GetPlayerInventoryMenuEnabled()) {
+                Runtime::ReconcileWithHiddenQuestItems(
+                    a_model,
+                    a_incremental,
+                    originalReconcile.get());
+            } else {
+                originalReconcile(a_model, a_incremental);
+            }
         }
 
-        [[nodiscard]] bool CallsThunk(
-            const REL::Relocation<std::uintptr_t>& a_site) noexcept
+        RE::UI_MESSAGE_RESULT ProcessMessageThunk(
+            RE::IMenu* a_menu,
+            RE::UIMessageData& a_message)
         {
-            const auto stubAddress = REL::ASM::CALL5::TARGET(a_site.address());
+            bool refresh = false;
+            switch (static_cast<std::uint32_t>(a_message.type)) {
+            case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kShow):
+            case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kUpdate):
+                refresh = !inventoryMenuOpen.exchange(true, std::memory_order_relaxed);
+                break;
+            case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kHide):
+            case kForceHideMessage:
+                refresh = inventoryMenuOpen.exchange(false, std::memory_order_relaxed);
+                break;
+            default:
+                break;
+            }
+
+            const auto result = originalProcessMessage(a_menu, a_message);
+            if (refresh) {
+                QueueRefresh();
+            }
+            return result;
+        }
+
+        [[nodiscard]] bool HasExpectedReconcilePrologue() noexcept
+        {
+            return reconcileAddress != 0 &&
+                   std::memcmp(
+                       reinterpret_cast<const void*>(reconcileAddress),
+                       kReconcilePrologue.data(),
+                       kReconcilePrologue.size()) == 0;
+        }
+
+        [[nodiscard]] bool ReconcileCallsThunk() noexcept
+        {
+            if (reconcileAddress == 0 ||
+                *reinterpret_cast<const std::uint8_t*>(reconcileAddress) != 0xE9) {
+                return false;
+            }
+
+            const auto stubAddress = REL::ASM::JMP5::TARGET(reconcileAddress);
             const auto* stub = reinterpret_cast<const REL::ASM::JMP14*>(stubAddress);
             return std::memcmp(stub, kAbsoluteJump.data(), kAbsoluteJump.size()) == 0 &&
-                   stub->addr == reinterpret_cast<std::uintptr_t>(&PublishItemThunk);
+                   stub->addr == reinterpret_cast<std::uintptr_t>(&ReconcileThunk);
         }
 
-        [[nodiscard]] bool RestoreCalls(
-            const REL::Relocation<std::uintptr_t>& a_initialSite,
-            const REL::Relocation<std::uintptr_t>& a_updateSite) noexcept
+        [[nodiscard]] bool RestoreReconcile() noexcept
         {
-            const auto initialRestored = REL::WriteSafe(
-                a_initialSite.address(),
-                kInitialPublishCall.data(),
-                kInitialPublishCall.size());
-            const auto updateRestored = REL::WriteSafe(
-                a_updateSite.address(),
-                kUpdatePublishCall.data(),
-                kUpdatePublishCall.size());
-            return initialRestored && updateRestored &&
-                   HasExpectedCall(a_initialSite, kInitialPublishCall) &&
-                   HasExpectedCall(a_updateSite, kUpdatePublishCall);
+            return reconcileAddress != 0 &&
+                   REL::WriteSafe(
+                       reconcileAddress,
+                       kReconcilePrologue.data(),
+                       kReconcilePrologue.size()) &&
+                   HasExpectedReconcilePrologue();
+        }
+
+        [[nodiscard]] bool InstallReconcile()
+        {
+            REL::Relocation<std::uintptr_t> target{
+                RE::ID::PlayerInventoryDataModel::Reconcile
+            };
+            reconcileAddress = target.address();
+            if (!HasExpectedReconcilePrologue()) {
+                logger::critical("Player inventory reconcile preflight failed for Starfield 1.16.244");
+                return false;
+            }
+
+            auto& trampoline = REL::GetTrampoline();
+            auto* gateway = static_cast<std::uint8_t*>(
+                trampoline.allocate(kReconcilePrologueSize + sizeof(REL::ASM::JMP14)));
+            std::memcpy(gateway, kReconcilePrologue.data(), kReconcilePrologue.size());
+            const REL::ASM::JMP14 returnJump{ reconcileAddress + kReconcilePrologueSize };
+            std::memcpy(
+                gateway + kReconcilePrologueSize,
+                std::addressof(returnJump),
+                sizeof(returnJump));
+            originalReconcile = reinterpret_cast<std::uintptr_t>(gateway);
+
+            target.write_jmp<kReconcilePrologueSize>(ReconcileThunk);
+            if (!ReconcileCallsThunk()) {
+                const auto rollbackVerified = RestoreReconcile();
+                logger::critical(
+                    "Player inventory reconcile hook verification failed; rollback verified: {}",
+                    rollbackVerified);
+                return false;
+            }
+
+            return true;
+        }
+
+        [[nodiscard]] bool ProcessMessageCallsThunk() noexcept
+        {
+            return processMessageSlotAddress != 0 &&
+                   *reinterpret_cast<const std::uintptr_t*>(processMessageSlotAddress) ==
+                       reinterpret_cast<std::uintptr_t>(&ProcessMessageThunk);
+        }
+
+        [[nodiscard]] bool RestoreProcessMessage() noexcept
+        {
+            return processMessageSlotAddress != 0 && processMessageAddress != 0 &&
+                   REL::WriteSafeData(processMessageSlotAddress, processMessageAddress) &&
+                   *reinterpret_cast<const std::uintptr_t*>(processMessageSlotAddress) ==
+                       processMessageAddress;
+        }
+
+        [[nodiscard]] bool InstallProcessMessage()
+        {
+            REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE::InventoryMenu[11] };
+            if (!vtable) {
+                return false;
+            }
+
+            processMessageSlotAddress =
+                vtable.address() + sizeof(void*) * kProcessMessageSlot;
+            processMessageAddress =
+                *reinterpret_cast<const std::uintptr_t*>(processMessageSlotAddress);
+            if (processMessageAddress == 0) {
+                return false;
+            }
+
+            originalProcessMessage = processMessageAddress;
+            const auto thunkAddress = reinterpret_cast<std::uintptr_t>(&ProcessMessageThunk);
+            if (!REL::WriteSafeData(processMessageSlotAddress, thunkAddress) ||
+                !ProcessMessageCallsThunk()) {
+                const auto rollbackVerified = RestoreProcessMessage();
+                logger::critical(
+                    "InventoryMenu lifecycle hook verification failed; rollback verified: {}",
+                    rollbackVerified);
+                return false;
+            }
+
+            return true;
         }
     }
 
     bool Install()
     {
-        originalPublishItem = kPublishItem;
-        if (!originalPublishItem) {
-            logger::critical("Could not resolve the player inventory row publisher");
+        if (!InstallProcessMessage()) {
+            logger::critical("Could not install the InventoryMenu lifecycle hook");
             return false;
         }
 
-        // Starfield 1.16.244 reaches the player row publisher through these two
-        // sites: bulk reconciliation and retained/single-item updates.
-        REL::Relocation<std::uintptr_t> initialSite{
-            kInitialPublishCaller,
-            kInitialPublishOffset
-        };
-        REL::Relocation<std::uintptr_t> updateSite{
-            kUpdatePublishCaller,
-            kUpdatePublishOffset
-        };
-
-        if (!HasExpectedCall(initialSite, kInitialPublishCall) ||
-            !HasExpectedCall(updateSite, kUpdatePublishCall)) {
-            logger::critical("Player inventory hook preflight failed for Starfield 1.16.244");
-            return false;
-        }
-
-        const auto initialOriginal = initialSite.write_call<5>(PublishItemThunk);
-        const auto updateOriginal = updateSite.write_call<5>(PublishItemThunk);
-        if (initialOriginal != originalPublishItem.address() ||
-            updateOriginal != originalPublishItem.address() ||
-            !CallsThunk(initialSite) || !CallsThunk(updateSite)) {
-            const auto rollbackVerified = RestoreCalls(initialSite, updateSite);
+        if (!InstallReconcile()) {
+            const auto rollbackVerified = RestoreProcessMessage();
             logger::critical(
-                "Player inventory hook verification failed; rollback verified: {}",
+                "Could not install the player inventory reconcile hook; lifecycle rollback verified: {}",
                 rollbackVerified);
             return false;
         }
 
-        logger::info("Installed player inventory data filter");
+        logger::info("Installed player inventory visibility hooks");
         return true;
+    }
+
+    void Refresh()
+    {
+        if (!RE::GameUIModel::ReconcilePlayerInventory(false)) {
+            logger::debug("Player inventory data model is not available for refresh");
+        }
     }
 }

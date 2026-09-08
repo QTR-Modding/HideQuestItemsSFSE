@@ -78,6 +78,7 @@ namespace HideQuestItems::Hooks
 
         tasks->AddTask([] {
             Runtime::RefreshContainerSettings();
+            PlayerInventory::Refresh();
         });
     }
 }

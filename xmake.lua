@@ -18,17 +18,12 @@ if is_plat("windows") then
     })
 end
 
--- CommonLibSF supplies the plugin rule; deployment remains an explicit step.
-rule("commonlib.plugin", function()
-    after_build(function() end)
-end)
-
 local plugin = {
     name = "HideQuestItemsSFSE",
     version = {
         major = 0,
         minor = 1,
-        patch = 1,
+        patch = 2,
         build = 0
     },
     author = "Quantumyilmaz",
