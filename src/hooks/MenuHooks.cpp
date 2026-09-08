@@ -1,5 +1,6 @@
 #include "hooks/MenuHooks.h"
 
+#include "hooks/PlayerInventoryHook.h"
 #include "runtime/QuestItemVisibility.h"
 
 #include <cstdint>
@@ -11,13 +12,12 @@ namespace HideQuestItems::Hooks
         constexpr std::uint32_t kForceHideMessage = 4;
         constexpr std::size_t kProcessMessageSlot = 0x08;
 
-        template <Runtime::MenuOwner Owner>
-        class ProcessMessageHook
+        class ContainerMenuHook
         {
         public:
-            [[nodiscard]] static bool Install(REL::ID a_vtable)
+            [[nodiscard]] static bool Install()
             {
-                REL::Relocation<std::uintptr_t> vtable{ a_vtable };
+                REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE::ContainerMenu[0] };
                 if (!vtable) {
                     return false;
                 }
@@ -33,17 +33,18 @@ namespace HideQuestItems::Hooks
             }
 
         private:
-            static RE::UI_MESSAGE_RESULT Thunk(RE::IMenu* a_menu, RE::UIMessageData& a_message)
+            static RE::UI_MESSAGE_RESULT Thunk(
+                RE::IMenu* a_menu,
+                RE::UIMessageData& a_message)
             {
-                const auto type = static_cast<std::uint32_t>(a_message.type);
-                switch (type) {
+                switch (static_cast<std::uint32_t>(a_message.type)) {
                 case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kShow):
                 case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kUpdate):
-                    Runtime::OpenOrRefresh(Owner);
+                    Runtime::OpenContainerMenu();
                     break;
                 case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kHide):
                 case kForceHideMessage:
-                    Runtime::Close(Owner);
+                    Runtime::CloseContainerMenu();
                     break;
                 default:
                     break;
@@ -59,12 +60,11 @@ namespace HideQuestItems::Hooks
 
     bool Install()
     {
-        if (!ProcessMessageHook<Runtime::MenuOwner::kContainer>::Install(RE::VTABLE::ContainerMenu[0]) ||
-            !ProcessMessageHook<Runtime::MenuOwner::kPlayerInventory>::Install(RE::VTABLE::InventoryMenu[11])) {
+        if (!PlayerInventory::Install() || !ContainerMenuHook::Install()) {
             return false;
         }
 
-        logger::info("Installed ContainerMenu and InventoryMenu hooks");
+        logger::info("Installed inventory and container menu hooks");
         return true;
     }
 
@@ -77,7 +77,8 @@ namespace HideQuestItems::Hooks
         }
 
         tasks->AddTask([] {
-            Runtime::RefreshSettings();
+            Runtime::RefreshContainerSettings();
+            PlayerInventory::Refresh();
         });
     }
 }

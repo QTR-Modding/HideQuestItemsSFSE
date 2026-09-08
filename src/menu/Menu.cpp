@@ -91,7 +91,7 @@ namespace HideQuestItems::Menu
                 ImGuiMCP::TextUnformatted(status);
             }
             if (dirty) {
-                ImGuiMCP::TextDisabled("Changes are live but not saved.");
+                ImGuiMCP::TextDisabled("Unsaved changes.");
             }
         }
     }

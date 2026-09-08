@@ -11,35 +11,18 @@ namespace HideQuestItems::Runtime
 {
     namespace
     {
-        using OwnerBits = std::uint8_t;
         using FormSet = std::unordered_set<RE::TESFormID>;
+
+        constexpr std::uint8_t kNotFavorited = 0xFE;
 
         struct HiddenForm
         {
             bool originalPlayable;
-            OwnerBits owners;
         };
 
         std::mutex visibilityMutex;
         std::unordered_map<RE::TESFormID, HiddenForm> hiddenForms;
-        OwnerBits openOwners = 0;
-
-        [[nodiscard]] constexpr OwnerBits ToBits(MenuOwner a_owner) noexcept
-        {
-            return static_cast<OwnerBits>(a_owner);
-        }
-
-        [[nodiscard]] bool IsEnabled(MenuOwner a_owner) noexcept
-        {
-            switch (a_owner) {
-            case MenuOwner::kContainer:
-                return Settings::GetContainerMenuEnabled();
-            case MenuOwner::kPlayerInventory:
-                return Settings::GetPlayerInventoryMenuEnabled();
-            }
-
-            return false;
-        }
+        bool containerMenuOpen = false;
 
         [[nodiscard]] FormSet CollectEligibleForms()
         {
@@ -50,40 +33,11 @@ namespace HideQuestItems::Runtime
             }
 
             player->ForEachInventoryItem([&result](const RE::BGSInventoryItem& a_item) {
-                if (!a_item.object || a_item.IsEquipped()) {
-                    return RE::BSContainer::ForEachResult::kContinue;
-                }
-
-                bool hasPositiveCount = false;
-                bool allPositiveStacksAreQuestItems = true;
-                bool hasExcludedStack = false;
-
-                for (const auto& stack : a_item.stacks) {
-                    if (stack.count == 0) {
-                        continue;
-                    }
-
-                    hasPositiveCount = true;
-                    const auto extra = stack.extra.get();
-                    if (!extra) {
-                        allPositiveStacksAreQuestItems = false;
-                        continue;
-                    }
-
-                    allPositiveStacksAreQuestItems =
-                        allPositiveStacksAreQuestItems && extra->HasQuestObjectAlias();
-                    hasExcludedStack = hasExcludedStack ||
-                                       extra->HasType(RE::ExtraDataType::kFavorite) ||
-                                       extra->HasType(RE::ExtraDataType::kLeveledItem);
-                }
-
-                if (hasPositiveCount && allPositiveStacksAreQuestItems && !hasExcludedStack) {
+                if (ShouldHide(a_item)) {
                     result.insert(a_item.object->GetFormID());
                 }
-
                 return RE::BSContainer::ForEachResult::kContinue;
             });
-
             return result;
         }
 
@@ -95,39 +49,27 @@ namespace HideQuestItems::Runtime
             }
         }
 
-        void ReleaseOwner(MenuOwner a_owner)
+        void RestoreAll()
         {
-            const auto owner = ToBits(a_owner);
+            for (const auto& [formID, hidden] : hiddenForms) {
+                RestoreForm(formID, hidden);
+            }
+            hiddenForms.clear();
+        }
+
+        void Apply(const FormSet& a_forms)
+        {
             for (auto iter = hiddenForms.begin(); iter != hiddenForms.end();) {
-                iter->second.owners &= static_cast<OwnerBits>(~owner);
-                if (iter->second.owners == 0) {
+                if (!a_forms.contains(iter->first)) {
                     RestoreForm(iter->first, iter->second);
                     iter = hiddenForms.erase(iter);
                 } else {
                     ++iter;
                 }
             }
-        }
-
-        void ApplyOwner(MenuOwner a_owner, const FormSet& a_forms)
-        {
-            const auto owner = ToBits(a_owner);
-
-            for (auto iter = hiddenForms.begin(); iter != hiddenForms.end();) {
-                if ((iter->second.owners & owner) != 0 && !a_forms.contains(iter->first)) {
-                    iter->second.owners &= static_cast<OwnerBits>(~owner);
-                    if (iter->second.owners == 0) {
-                        RestoreForm(iter->first, iter->second);
-                        iter = hiddenForms.erase(iter);
-                        continue;
-                    }
-                }
-                ++iter;
-            }
 
             for (const auto formID : a_forms) {
-                if (const auto existing = hiddenForms.find(formID); existing != hiddenForms.end()) {
-                    existing->second.owners |= owner;
+                if (hiddenForms.contains(formID)) {
                     continue;
                 }
 
@@ -136,56 +78,60 @@ namespace HideQuestItems::Runtime
                     continue;
                 }
 
-                hiddenForms.emplace(formID, HiddenForm{ true, owner });
+                hiddenForms.emplace(formID, HiddenForm{ form->GetPlayable() });
                 form->SetPlayable(false);
             }
         }
-
     }
 
-    void OpenOrRefresh(MenuOwner a_owner)
+    bool ShouldHide(const RE::BGSInventoryItem& a_item) noexcept
+    {
+        if (!a_item.object || a_item.IsEquipped() ||
+            static_cast<std::uint8_t>(a_item.unk24) != kNotFavorited) {
+            return false;
+        }
+
+        bool hasPositiveCount = false;
+        for (const auto& stack : a_item.stacks) {
+            if (stack.count == 0) {
+                continue;
+            }
+
+            hasPositiveCount = true;
+            if (const auto extra = stack.extra.get();
+                extra && extra->HasType(RE::ExtraDataType::kLeveledItem)) {
+                return false;
+            }
+        }
+
+        return hasPositiveCount && a_item.IsQuestObject();
+    }
+
+    void OpenContainerMenu()
     {
         const std::scoped_lock lock(visibilityMutex);
-        openOwners |= ToBits(a_owner);
-
-        if (IsEnabled(a_owner)) {
-            ApplyOwner(a_owner, CollectEligibleForms());
+        containerMenuOpen = true;
+        if (Settings::GetContainerMenuEnabled()) {
+            Apply(CollectEligibleForms());
         } else {
-            ReleaseOwner(a_owner);
+            RestoreAll();
         }
     }
 
-    void Close(MenuOwner a_owner)
+    void CloseContainerMenu()
     {
         const std::scoped_lock lock(visibilityMutex);
-        openOwners &= static_cast<OwnerBits>(~ToBits(a_owner));
-        ReleaseOwner(a_owner);
+        containerMenuOpen = false;
+        RestoreAll();
     }
 
-    void RefreshSettings()
+    void RefreshContainerSettings()
     {
         const std::scoped_lock lock(visibilityMutex);
-        const auto containerOpen = (openOwners & ToBits(MenuOwner::kContainer)) != 0;
-        const auto inventoryOpen = (openOwners & ToBits(MenuOwner::kPlayerInventory)) != 0;
-        const auto containerEnabled = containerOpen && IsEnabled(MenuOwner::kContainer);
-        const auto inventoryEnabled = inventoryOpen && IsEnabled(MenuOwner::kPlayerInventory);
-
-        FormSet eligible;
-        if (containerEnabled || inventoryEnabled) {
-            eligible = CollectEligibleForms();
-        }
-
-        if (containerEnabled) {
-            ApplyOwner(MenuOwner::kContainer, eligible);
+        if (containerMenuOpen && Settings::GetContainerMenuEnabled()) {
+            Apply(CollectEligibleForms());
         } else {
-            ReleaseOwner(MenuOwner::kContainer);
-        }
-
-        if (inventoryEnabled) {
-            ApplyOwner(MenuOwner::kPlayerInventory, eligible);
-        } else {
-            ReleaseOwner(MenuOwner::kPlayerInventory);
+            RestoreAll();
         }
     }
-
 }
