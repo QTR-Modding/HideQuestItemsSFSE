@@ -77,7 +77,7 @@ target(plugin.name)
     add_packages("rapidjson")
     add_files("src/**.cpp")
     add_headerfiles("src/**.h")
-    add_includedirs("src", path.join(sfsemcp, "include"))
+    add_includedirs("src", path.join(sfsemcp, "include"), path.join(sfsemcp, "lib/clib-utils-qtr/include"))
     add_installfiles("COPYING", "EXCEPTIONS", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt")
     set_pcxxheader("src/PCH.h")
 
