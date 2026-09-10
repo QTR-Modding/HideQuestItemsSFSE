@@ -21,9 +21,9 @@ end
 local plugin = {
     name = "HideQuestItemsSFSE",
     version = {
-        major = 0,
-        minor = 1,
-        patch = 4,
+        major = 1,
+        minor = 0,
+        patch = 0,
         build = 0
     },
     author = "Quantumyilmaz",
