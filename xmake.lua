@@ -23,7 +23,7 @@ local plugin = {
     version = {
         major = 1,
         minor = 0,
-        patch = 0,
+        patch = 1,
         build = 0
     },
     author = "Quantumyilmaz",
