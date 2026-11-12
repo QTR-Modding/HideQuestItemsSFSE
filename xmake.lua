@@ -73,6 +73,7 @@ target(plugin.name)
         "HIDEQUESTITEMS_VERSION_PATCH=" .. plugin.version.patch,
         "HIDEQUESTITEMS_VERSION_BUILD=" .. plugin.version.build)
     set_kind("shared")
+    add_rules("sf1sdk.plugin", { stage = true, symbols = false })
     add_deps("SF1SDK")
     add_packages("spdlog")
     add_files("src/Version.rc")
@@ -95,12 +96,4 @@ target(plugin.name)
     add_installfiles("COPYING", "EXCEPTIONS", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt")
     set_pcxxheader("src/PCH.h")
 
-    on_config(function(target)
-        target:set("installdir", staging_dir)
-        target:remove("installfiles", target:symbolfile())
-    end)
-
-    before_build(function(target)
-        assert(path.absolute(target:installdir()) == path.absolute(staging_dir),
-            "build output must remain in the project staging directory")
-    end)
+    set_installdir(staging_dir)
