@@ -87,18 +87,18 @@ namespace HideQuestItems::Runtime
     bool ShouldHide(const RE::BGSInventoryItem& a_item) noexcept
     {
         if (!a_item.object || a_item.IsEquipped() ||
-            static_cast<std::uint8_t>(a_item.unk24) != kNotFavorited) {
+            a_item.FavoriteIndex() != kNotFavorited) {
             return false;
         }
 
         bool hasPositiveCount = false;
-        for (const auto& stack : a_item.stacks) {
-            if (stack.count == 0) {
+        for (const auto& stack : a_item.Stacks()) {
+            if (stack.Count() == 0) {
                 continue;
             }
 
             hasPositiveCount = true;
-            if (const auto extra = stack.extra.get();
+            if (const auto extra = stack.ExtraData();
                 extra && extra->HasType(RE::ExtraDataType::kLeveledItem)) {
                 return false;
             }

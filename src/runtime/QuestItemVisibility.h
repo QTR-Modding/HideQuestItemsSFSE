@@ -2,7 +2,7 @@
 
 namespace RE
 {
-    class BGSInventoryItem;
+    struct BGSInventoryItem;
 }
 
 namespace HideQuestItems::Runtime
