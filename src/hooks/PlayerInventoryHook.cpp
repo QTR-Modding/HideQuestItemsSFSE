@@ -3,9 +3,6 @@
 #include "runtime/QuestItemVisibility.h"
 #include "settings/Settings.h"
 
-#include "REL/ASM.h"
-#include "REL/Utility.h"
-
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -29,9 +26,6 @@ namespace HideQuestItems::Hooks::PlayerInventory
         constexpr std::array<std::uint8_t, 5> kUpdatePublishCall{
             0xE8, 0x6B, 0xCE, 0xFF, 0xFF
         };
-        constexpr std::array<std::uint8_t, 6> kAbsoluteJump{
-            0xFF, 0x25, 0x00, 0x00, 0x00, 0x00
-        };
 
         struct PublishContext
         {
@@ -40,7 +34,7 @@ namespace HideQuestItems::Hooks::PlayerInventory
         };
         static_assert(offsetof(PublishContext, handle) == 0x8);
 
-        REL::Relocation<PublishItem> originalPublishItem;
+        PublishItem originalPublishItem{};
 
         void QueueRowRemoval(const RE::InventoryInterface::Handle& a_handle)
         {
@@ -75,37 +69,22 @@ namespace HideQuestItems::Hooks::PlayerInventory
         }
 
         [[nodiscard]] bool HasExpectedCall(
-            const REL::Relocation<std::uintptr_t>& a_site,
+            std::uintptr_t a_site,
             const std::array<std::uint8_t, 5>& a_bytes) noexcept
         {
             return std::memcmp(
-                       reinterpret_cast<const void*>(a_site.address()),
+                       reinterpret_cast<const void*>(a_site),
                        a_bytes.data(),
                        a_bytes.size()) == 0 &&
-                   REL::ASM::CALL5::TARGET(a_site.address()) == originalPublishItem.address();
-        }
-
-        [[nodiscard]] bool CallsThunk(
-            const REL::Relocation<std::uintptr_t>& a_site) noexcept
-        {
-            const auto stubAddress = REL::ASM::CALL5::TARGET(a_site.address());
-            const auto* stub = reinterpret_cast<const REL::ASM::JMP14*>(stubAddress);
-            return std::memcmp(stub, kAbsoluteJump.data(), kAbsoluteJump.size()) == 0 &&
-                   stub->addr == reinterpret_cast<std::uintptr_t>(&PublishItemThunk);
+                   SF1::Hooks::CallTarget(a_site) == reinterpret_cast<std::uintptr_t>(originalPublishItem);
         }
 
         [[nodiscard]] bool RestoreCalls(
-            const REL::Relocation<std::uintptr_t>& a_initialSite,
-            const REL::Relocation<std::uintptr_t>& a_updateSite) noexcept
+            std::uintptr_t a_initialSite,
+            std::uintptr_t a_updateSite) noexcept
         {
-            const auto initialRestored = REL::WriteSafe(
-                a_initialSite.address(),
-                kInitialPublishCall.data(),
-                kInitialPublishCall.size());
-            const auto updateRestored = REL::WriteSafe(
-                a_updateSite.address(),
-                kUpdatePublishCall.data(),
-                kUpdatePublishCall.size());
+            const auto initialRestored = SF1::Hooks::WriteCode(a_initialSite, kInitialPublishCall);
+            const auto updateRestored = SF1::Hooks::WriteCode(a_updateSite, kUpdatePublishCall);
             return initialRestored && updateRestored &&
                    HasExpectedCall(a_initialSite, kInitialPublishCall) &&
                    HasExpectedCall(a_updateSite, kUpdatePublishCall);
@@ -114,20 +93,9 @@ namespace HideQuestItems::Hooks::PlayerInventory
 
     bool Install()
     {
-        originalPublishItem = kPublishItem;
-        if (!originalPublishItem) {
-            logger::critical("Could not resolve the player inventory row publisher");
-            return false;
-        }
-
-        REL::Relocation<std::uintptr_t> initialSite{
-            kInitialPublishCaller,
-            kInitialPublishOffset
-        };
-        REL::Relocation<std::uintptr_t> updateSite{
-            kUpdatePublishCaller,
-            kUpdatePublishOffset
-        };
+        originalPublishItem = SF1::At<PublishItem>(kPublishItem);
+        const auto initialSite = SF1::ResolveID(kInitialPublishCaller.value) + kInitialPublishOffset;
+        const auto updateSite = SF1::ResolveID(kUpdatePublishCaller.value) + kUpdatePublishOffset;
 
         if (!HasExpectedCall(initialSite, kInitialPublishCall) ||
             !HasExpectedCall(updateSite, kUpdatePublishCall)) {
@@ -135,11 +103,12 @@ namespace HideQuestItems::Hooks::PlayerInventory
             return false;
         }
 
-        const auto initialOriginal = initialSite.write_call<5>(PublishItemThunk);
-        const auto updateOriginal = updateSite.write_call<5>(PublishItemThunk);
-        if (initialOriginal != originalPublishItem.address() ||
-            updateOriginal != originalPublishItem.address() ||
-            !CallsThunk(initialSite) || !CallsThunk(updateSite)) {
+        const auto relay = SF1::Hooks::AllocateCallRelay(REL::GetTrampoline(), reinterpret_cast<std::uintptr_t>(&PublishItemThunk));
+        if (!SF1::Hooks::CanReachCall(initialSite, relay) || !SF1::Hooks::CanReachCall(updateSite, relay)) {
+            logger::critical("Player inventory hook relay is unavailable");
+            return false;
+        }
+        if (!SF1::Hooks::WriteCall(initialSite, relay) || !SF1::Hooks::WriteCall(updateSite, relay)) {
             const auto rollbackVerified = RestoreCalls(initialSite, updateSite);
             logger::critical(
                 "Player inventory hook verification failed; rollback verified: {}",

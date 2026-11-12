@@ -9,7 +9,6 @@ namespace HideQuestItems::Hooks
 {
     namespace
     {
-        constexpr std::uint32_t kForceHideMessage = 4;
         constexpr std::size_t kProcessMessageSlot = 0x08;
 
         class ContainerMenuHook
@@ -17,19 +16,8 @@ namespace HideQuestItems::Hooks
         public:
             [[nodiscard]] static bool Install()
             {
-                REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE::ContainerMenu[0] };
-                if (!vtable) {
-                    return false;
-                }
-
-                const auto current = *reinterpret_cast<const std::uintptr_t*>(
-                    vtable.address() + sizeof(void*) * kProcessMessageSlot);
-                if (current == 0) {
-                    return false;
-                }
-
-                original = vtable.write_vfunc(kProcessMessageSlot, Thunk);
-                return static_cast<bool>(original);
+                const auto table = SF1::ResolveID(RE::VTABLE::ContainerMenu.value);
+                return SF1::Hooks::HookVTable(table, kProcessMessageSlot, Thunk, original);
             }
 
         private:
@@ -37,13 +25,13 @@ namespace HideQuestItems::Hooks
                 RE::IMenu* a_menu,
                 RE::UIMessageData& a_message)
             {
-                switch (static_cast<std::uint32_t>(a_message.type)) {
-                case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kShow):
-                case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kUpdate):
+                switch (a_message.Type()) {
+                case RE::UI_MESSAGE_TYPE::kShow:
+                case RE::UI_MESSAGE_TYPE::kUpdate:
                     Runtime::OpenContainerMenu();
                     break;
-                case static_cast<std::uint32_t>(RE::UI_MESSAGE_TYPE::kHide):
-                case kForceHideMessage:
+                case RE::UI_MESSAGE_TYPE::kHide:
+                case RE::UI_MESSAGE_TYPE::kForceHide:
                     Runtime::CloseContainerMenu();
                     break;
                 default:
@@ -54,7 +42,7 @@ namespace HideQuestItems::Hooks
             }
 
             using ProcessMessage = RE::UI_MESSAGE_RESULT (*)(RE::IMenu*, RE::UIMessageData&);
-            static inline REL::Relocation<ProcessMessage> original;
+            static inline ProcessMessage original{};
         };
     }
 
